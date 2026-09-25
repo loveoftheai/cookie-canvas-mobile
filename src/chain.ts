@@ -30,7 +30,9 @@ export const NETWORKS: Record<string, NetCfg> = {
   devnet: {
     key: 'devnet',
     label: 'Solana Devnet',
-    rpc: 'https://api.devnet.solana.com',
+    // Alchemy-hosted endpoint for the SAME public devnet chain (client-side
+    // key, standard practice; rotate anytime from the Alchemy dashboard).
+    rpc: 'https://solana-devnet.g.alchemy.com/v2/alch_d0Q0YtcyQ5iO-sVOteBRN',
     treasury: '2hAXRdZkoZvgeA9FK5jxhPXtRPk7Z51XFJa8b6pgdYtE',
     unit: 'SOL (devnet)',
   },
@@ -77,8 +79,16 @@ export function parseMemo(str: string): {
   return {x, y, rgb: m[3].toLowerCase()};
 }
 
+// One Connection per network, reused: web3.js numbers RPC request ids from 0
+// per connection, and a fresh Connection per call makes every
+// getLatestBlockhash body byte-identical — Alchemy's edge cache then serves a
+// stale (hours-old) blockhash and every tx dies with BlockhashNotFound.
+const connCache: Record<string, Connection> = {};
 export function connectionFor(net: NetCfg): Connection {
-  return new Connection(net.rpc, {commitment: 'confirmed'});
+  if (!connCache[net.key]) {
+    connCache[net.key] = new Connection(net.rpc, {commitment: 'confirmed'});
+  }
+  return connCache[net.key];
 }
 
 export function treasuryFor(net: NetCfg): PublicKey {
@@ -149,7 +159,7 @@ interface ParsedTx {
       instructions: {parsed?: unknown}[];
     };
   };
-  meta?: {logMessages?: string[]};
+  meta?: {err?: unknown | null; logMessages?: string[]};
 }
 
 function extractMemoFromLogs(logs?: string[]): string | null {
@@ -166,12 +176,15 @@ function extractMemoFromLogs(logs?: string[]): string | null {
 }
 
 function pixelFromTx(tx: ParsedTx, signature: string): Pixel | null {
+  if (tx.meta?.err) {
+    return null; // failed tx never placed a pixel
+  }
   const signerKey =
-    tx.transaction.message.accountKeys.find((k) => k.signer) ??
+    tx.transaction.message.accountKeys.find(k => k.signer) ??
     tx.transaction.message.accountKeys[0];
   const memo =
     (tx.transaction.message.instructions
-      .map((i) => (i.parsed && typeof i.parsed === 'string' ? i.parsed : null))
+      .map(i => (i.parsed && typeof i.parsed === 'string' ? i.parsed : null))
       .find(Boolean) as string | undefined) ??
     extractMemoFromLogs(tx.meta?.logMessages);
   const pixel = memo ? parseMemo(memo) : null;
@@ -194,45 +207,51 @@ export async function fetchPixelsBatch(
 ): Promise<(Pixel | null)[]> {
   const results: (Pixel | null)[] = new Array(signatures.length).fill(null);
   let pending = signatures.map((signature, i) => ({signature, i}));
-  for (let round = 0; round < 2 && pending.length; round++) {
+  for (let round = 0; round < 4 && pending.length; round++) {
     if (round) {
-      await new Promise((r) => setTimeout(r, 600));
+      await new Promise(r => setTimeout(r, 800));
     }
-    const res = await fetch(net.rpc, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(
-        pending.map(({signature}, i) => ({
-          jsonrpc: '2.0',
-          id: i,
-          method: 'getTransaction',
-          params: [
-            signature,
-            {maxSupportedTransactionVersion: 0, encoding: 'jsonParsed'},
-          ],
-        })),
-      ),
-    });
-    if (!res.ok) {
-      throw new Error('batch rpc http ' + res.status);
-    }
-    const arr = (await res.json()) as {
-      id: number;
-      error?: unknown;
-      result?: ParsedTx;
-    }[];
-    const byId = new Map(arr.map((r) => [r.id, r]));
+    // Small chunks: huge single batches make Alchemy drop random getTransaction
+    // results (nulls), which showed up as holes in the rebuilt board.
     const still: {signature: string; i: number}[] = [];
-    for (let i = 0; i < pending.length; i++) {
-      const r = byId.get(i);
-      if (r && !r.error && r.result) {
-        try {
-          results[pending[i].i] = pixelFromTx(r.result, pending[i].signature);
-        } catch {
-          /* unparseable — leave null */
+    for (let c = 0; c < pending.length; c += 50) {
+      const chunk = pending.slice(c, c + 50);
+      const res = await fetch(net.rpc, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(
+          chunk.map(({signature}, i) => ({
+            jsonrpc: '2.0',
+            id: i,
+            method: 'getTransaction',
+            params: [
+              signature,
+              {maxSupportedTransactionVersion: 0, encoding: 'jsonParsed'},
+            ],
+          })),
+        ),
+      });
+      if (!res.ok) {
+        still.push(...chunk);
+        continue;
+      }
+      const arr = (await res.json()) as {
+        id: number;
+        error?: unknown;
+        result?: ParsedTx;
+      }[];
+      const byId = new Map(arr.map(r => [r.id, r]));
+      for (let i = 0; i < chunk.length; i++) {
+        const r = byId.get(i);
+        if (r && !r.error && r.result) {
+          try {
+            results[chunk[i].i] = pixelFromTx(r.result, chunk[i].signature);
+          } catch {
+            /* unparseable — leave null */
+          }
+        } else {
+          still.push(chunk[i]);
         }
-      } else {
-        still.push(pending[i]);
       }
     }
     pending = still;

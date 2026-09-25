@@ -1,3 +1,12 @@
+// aarch64 host: hermesc prebuilt is x86_64-only, but binfmt_misc x86_64
+// emulation is registered on this machine, so it runs fine — point the build
+// straight at it (react.gradle's OS check would otherwise reject linux/aarch64).
+project.ext.react = [
+    enableHermes: true,
+    hermesCommand: "../../node_modules/react-native/sdks/hermesc/linux64-bin/hermesc",
+]
+import org.apache.tools.ant.taskdefs.condition.Os
+
 apply plugin: "com.android.application"
 apply plugin: "com.facebook.react"
 
@@ -8,6 +17,10 @@ import com.android.build.OutputFile
  * By default you don't need to apply any configuration, just uncomment the lines you need.
  */
 react {
+    // aarch64 host: PathUtils.getHermesOSBin() throws on linux/aarch64, so hand it
+    // the x86_64 hermesc directly — it executes fine here via binfmt_misc.
+    hermesCommand = "/home/justin/data/explore/cookie-canvas-mobile/node_modules/react-native/sdks/hermesc/linux64-bin/hermesc"
+
     /* Folders */
     //   The root of your project, i.e. where "package.json" lives. Default is '..'
     // root = file("../")
@@ -76,7 +89,9 @@ def enableProguardInReleaseBuilds = false
  * give correct results when using with locales other than en-US. Note that
  * this variant is about 6MiB larger per architecture than default.
  */
-def jscFlavor = 'org.webkit:android-jsc:+'
+// r245459 (Safari 13-era JSC): has BigInt, which @solana/web3.js requires —
+// the default '+' resolves to an old JSC without it and crashes at runtime.
+def jscFlavor = 'org.webkit:android-jsc:r250231'
 
 /**
  * Private function to get the list of Native Architectures you want to build.
@@ -95,7 +110,7 @@ android {
 
     namespace "com.solanamobiledappscaffold"
     defaultConfig {
-        applicationId "com.solanamobiledappscaffold"
+        applicationId "com.cookiecanvas"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode 1

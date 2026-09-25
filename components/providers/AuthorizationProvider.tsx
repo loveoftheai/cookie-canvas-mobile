@@ -64,6 +64,11 @@ function getPublicKeyFromAddress(address: Base64EncodedAddress): PublicKey {
 }
 
 export const APP_IDENTITY = {
+  // Scaffold-default identity, kept deliberately: FakeWallet's source
+  // verification (assetlinks.json fetch) fails *deterministically* for this
+  // network path, so authorization falls back to package-scoped auth and
+  // sign/send sheets approve consistently. A production build would publish
+  // /.well-known/assetlinks.json on the app's own domain and use that URI.
   name: 'React Native dApp',
   uri: 'https://solanamobile.com',
   icon: 'favicon.ico',
